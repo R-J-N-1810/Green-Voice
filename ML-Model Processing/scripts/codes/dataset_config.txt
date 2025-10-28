@@ -1,0 +1,4 @@
+data_path = r'.\full_merged_data.csv'
+label_col = 'plant_health_status'
+num_classes = 0
+classes = []

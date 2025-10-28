@@ -1,0 +1,15 @@
+CNN-LSTM MODEL TRAINING RESULTS
+======================================================================
+
+Number of Classes: 2
+Classes: [np.float64(0.3333333333333333), np.float64(1.0)]
+
+Training Samples: 208
+Validation Samples: 45
+Test Samples: 45
+
+Final Epoch: 16
+Best Train Accuracy: 0.7644
+Best Val Accuracy: 0.7778
+Test Accuracy: 0.7778 (77.78%)
+Test Loss: 0.6839

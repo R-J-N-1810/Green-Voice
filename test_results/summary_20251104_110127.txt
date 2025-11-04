@@ -1,0 +1,47 @@
+
+======================================================================
+GREEN VOICE PLANT HEALTH MONITORING - TEST SUMMARY
+======================================================================
+
+Test Session: 20251104_110127
+Duration: 106.2 seconds (1.8 minutes)
+Total Predictions: 6
+
+======================================================================
+FINAL DIAGNOSIS
+======================================================================
+
+PLANT STATUS: DISEASED
+Confidence: 54.2%
+
+Prediction Breakdown:
+  * Diseased: 6 times (100.0%)
+
+======================================================================
+SENSOR ANALYSIS
+======================================================================
+
+Temperature:
+  Average: 27.7 C
+  Range: 27.6 C - 27.7 C
+
+Humidity:
+  Average: 68.3%
+  Range: 68.1% - 68.6%
+
+Soil Moisture:
+  Average: 100%
+  Range: 100% - 100%
+
+Bio-Signal:
+  Average: -24.75 mV
+  Range: -24.75 mV - -24.75 mV
+
+======================================================================
+DATA SAVED
+======================================================================
+
+Detailed Log: D:\Green-Voice\test_results\test_session_20251104_110127.csv
+This Summary: D:\Green-Voice\test_results\summary_20251104_110127.txt
+
+======================================================================

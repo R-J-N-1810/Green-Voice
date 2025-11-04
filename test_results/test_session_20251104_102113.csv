@@ -1,0 +1,6 @@
+timestamp,temp_c,humidity_p,pressure_hpa,light_lux,soil_moisture_p,bio_signal_mv,prediction,confidence
+80000,24.63,57.66,1006.22,9,100,-24.752,Diseased,54.25007
+85000,24.62,57.47,1006.21,9,100,-24.752,Diseased,54.250126
+90000,24.62,57.34,1006.19,9,100,-24.752,Diseased,54.25026
+95000,24.62,57.38,1006.24,9,100,-23.221,Diseased,54.250206
+100000,24.61,57.4,1006.24,9,100,-22.941,Diseased,54.25022

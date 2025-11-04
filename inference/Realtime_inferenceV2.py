@@ -2,156 +2,305 @@ import serial
 import json
 import time
 import numpy as np
-import pandas as pd
 import tensorflow as tf
-import pickle
 import os
+import pandas as pd
+import pickle
 
-# --- 1. CONFIGURATION ---
-# >>> CHANGE THIS TO YOUR ESP32's SERIAL PORT <<<
-SERIAL_PORT = '/dev/ttyUSB0'  # Example: Use 'COM3' on Windows
-BAUD_RATE = 115200             # Must match your Arduino code
-# Time steps for the CNN-LSTM model. Your model was trained with sequences of this length.
-# This means we need to buffer this many samples before making a prediction.
-TIMESTEPS = 16 
+# ===============================================
+# === 1. CONFIGURATION ===
+# ===============================================
 
-models_dir = '../models'
-datasets_dir = '../datasets'
+SERIAL_PORT = 'COM8'
+BAUD_RATE = 115200
 
-# --- 2. LOAD MODEL AND UTILITIES ---
-print("Loading model and utilities...")
-try:
-    model_path = os.path.join(models_dir, 'final_cnn_lstm_model.keras')
-    model = tf.keras.models.load_model(model_path)
-    with open(os.path.join(datasets_dir, 'label_encoder.pkl'), 'rb') as f:
-        label_encoder = pickle.load(f)
-    with open(os.path.join(datasets_dir, 'scaler.pkl'), 'rb') as f:
-        scaler = pickle.load(f)
-    print("Model and utilities loaded successfully.")
-except Exception as e:
-    print(f"Error loading model/utilities. Check file paths: {e}")
-    exit()
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ML_PROCESS_DIR = os.path.join(PROJECT_ROOT, 'ML-Model Processing')
+MODELS_DIR = os.path.join(ML_PROCESS_DIR, 'scripts', 'models')
+CODES_DIR = os.path.join(ML_PROCESS_DIR, 'scripts', 'codes')
+MODEL_PATH = os.path.join(MODELS_DIR, 'final_cnn_lstm_model.keras')
+LABEL_ENCODER_PATH = os.path.join(CODES_DIR, 'label_encoder.pkl')  # Try codes dir
 
-# --- 3. HELPER FUNCTIONS (Adapted from your predict code) ---
-
-def generate_status_text(disease_class, confidence):
-    """Generates user-friendly status text based on prediction and confidence."""
-    dcstr = str(disease_class).lower()
-    
-    # Check for keywords and set confidence thresholds
-    if 'healthy' in dcstr or 'normal' in dcstr:
-        if confidence >= 85:
-            return f"🌿 HEALTHY ({confidence:.1f}%)"
-        else:
-            return f"🌱 MAYBE HEALTHY ({confidence:.1f}%)"
-    elif 'disease' in dcstr or 'blight' in dcstr or 'rust' in dcstr:
-        if confidence >= 85:
-            return f"🚨 {disease_class} ({confidence:.1f}%)"
-        else:
-            return f"⚠ POTENTIAL {disease_class} ({confidence:.1f}%)"
-    else:
-        return f"❓ {disease_class} ({confidence:.1f}%) - Review"
-
-# --- NEW: Function to process and predict a single sample buffer ---
-def predict_from_buffer(data_buffer):
-    """
-    Takes a 2D NumPy array (TIMESTEPS x features) and makes a prediction.
-    """
-    # X is already a buffer of TIMESTEPS samples
-    X = np.array(data_buffer).astype('float32')
-
-    # 1. Scale the data (Scaler expects (n_samples, n_features))
-    # We treat the entire buffer (TIMESTEPS rows) as n_samples
-    X_scaled = scaler.transform(X)
-
-    # 2. Reshape for CNN-LSTM: (1, TIMESTEPS, n_features)
-    # The reshape_for_lstm from your original code is designed for a single CSV row.
-    # For a real-time buffer, we reshape directly:
-    n_features = X_scaled.shape[1]
-    X_lstm = X_scaled.reshape(1, TIMESTEPS, n_features)
-
-    # 3. Predict
-    predictions = model.predict(X_lstm, verbose=0)
-    
-    # 4. Process results
-    predicted_class_idx = np.argmax(predictions, axis=1)[0]
-    predicted_confidence = np.max(predictions, axis=1)[0] * 100
-    predicted_label = label_encoder.inverse_transform([predicted_class_idx])[0]
-    
-    status_text = generate_status_text(predicted_label, predicted_confidence)
-
-    return predicted_label, predicted_confidence, status_text
-
-# --- 4. SERIAL COMMUNICATION AND MAIN LOOP ---
-
-# List to store the features for the TIMESTEPS buffer
-# The order of features must match the order the model was trained on!
-feature_keys = [
+# Hardware provides 6 features
+HARDWARE_FEATURE_KEYS = [
     "temp_c", "humidity_p", "pressure_hpa", 
     "light_lux", "soil_moisture_p", "bio_signal_mv"
 ]
 
+EXPECTED_FEATURES = 82
+TIMESTEPS = 16
+DEFAULT_FEATURE_VALUE = 0.0
+
+LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, 'plant_health_log.csv')
+
+# ===============================================
+# === 2. LOAD MODEL & LABEL ENCODER ===
+# ===============================================
+
+print("\n" + "="*60)
+print("🌱 GREEN VOICE: PLANT HEALTH MONITORING SYSTEM")
+print("="*60)
+print(f"\n📂 Project Root: {PROJECT_ROOT}")
+print(f"📂 Model Path: {MODEL_PATH}")
+print(f"🔌 Serial Port: {SERIAL_PORT}\n")
+
+# Load model
+try:
+    model = tf.keras.models.load_model(MODEL_PATH)
+    print("✅ Model loaded successfully!")
+    print(f"   Input shape: {model.input_shape}")
+    print(f"   Output shape: {model.output_shape}")
+    
+    model_timesteps = model.input_shape[1]
+    model_features = model.input_shape[2]
+    num_classes = model.output_shape[1]
+    
+    print(f"\n📊 Model Configuration:")
+    print(f"   Timesteps: {model_timesteps}")
+    print(f"   Features: {model_features}")
+    print(f"   Classes: {num_classes}")
+    print(f"\n🔧 Hardware: {len(HARDWARE_FEATURE_KEYS)} features → Padding to {model_features}")
+    
+except Exception as e:
+    print(f"❌ ERROR loading model: {e}")
+    exit(1)
+
+# Load label encoder (try multiple locations)
+label_encoder_loaded = False
+for path in [LABEL_ENCODER_PATH, 
+             os.path.join(ML_PROCESS_DIR, 'scripts', 'datasets', 'label_encoder.pkl'),
+             os.path.join(CODES_DIR, '../datasets/label_encoder.pkl')]:
+    try:
+        with open(path, 'rb') as f:
+            label_encoder = pickle.load(f)
+        LABEL_MAP = {i: label for i, label in enumerate(label_encoder.classes_)}
+        print(f"\n✅ Label encoder loaded from: {path}")
+        print(f"   Classes: {list(LABEL_MAP.values())}")
+        label_encoder_loaded = True
+        break
+    except:
+        continue
+
+if not label_encoder_loaded:
+    print(f"\n⚠️  Label encoder not found, using default labels")
+    # Create default labels based on number of classes
+    if num_classes == 2:
+        LABEL_MAP = {0: "Healthy", 1: "Diseased"}
+    elif num_classes == 3:
+        LABEL_MAP = {0: "Healthy", 1: "Early Disease", 2: "Severe Disease"}
+    elif num_classes == 4:
+        LABEL_MAP = {0: "Healthy", 1: "Early Disease", 2: "Drought Stress", 3: "Pest Damage"}
+    else:
+        LABEL_MAP = {i: f"Class_{i}" for i in range(num_classes)}
+    print(f"   Default classes: {list(LABEL_MAP.values())}")
+
+# ===============================================
+# === 3. FEATURE PROCESSING ===
+# ===============================================
+
+def pad_features_to_82(hardware_features_6):
+    """Pad 6 hardware features to 82 features"""
+    padded_features = list(hardware_features_6)
+    padding_needed = EXPECTED_FEATURES - len(HARDWARE_FEATURE_KEYS)
+    padded_features.extend([DEFAULT_FEATURE_VALUE] * padding_needed)
+    return np.array(padded_features)
+
+def prepare_sequence_for_model(data_buffer):
+    """Convert hardware data buffer to model input"""
+    padded_sequence = []
+    for hardware_sample in data_buffer:
+        padded_sample = pad_features_to_82(hardware_sample)
+        padded_sequence.append(padded_sample)
+    
+    X = np.array(padded_sequence).astype('float32')
+    X_scaled = normalize_features(X)
+    X_model = X_scaled.reshape(1, TIMESTEPS, EXPECTED_FEATURES)
+    
+    return X_model
+
+def normalize_features(X):
+    """Normalize features"""
+    X_norm = X.copy()
+    
+    # Normalize first 6 hardware features
+    feature_mins = np.array([10.0, 30.0, 950.0, 0.0, 0.0, -100.0])
+    feature_maxs = np.array([40.0, 95.0, 1050.0, 30000.0, 100.0, 100.0])
+    
+    for i in range(len(HARDWARE_FEATURE_KEYS)):
+        X_norm[:, i] = (X[:, i] - feature_mins[i]) / (feature_maxs[i] - feature_mins[i] + 1e-8)
+    
+    return X_norm
+
+# ===============================================
+# === 4. PREDICTION FUNCTIONS ===
+# ===============================================
+
+def get_label_from_index(index, confidence):
+    """Translate index to label"""
+    label = LABEL_MAP.get(index, "UNKNOWN")
+    
+    if confidence < 60:
+        return f"❓ UNCERTAIN ({confidence:.1f}%)", "🟡"
+    elif any(word in label.lower() for word in ['healthy', 'normal', 'good']):
+        return f"🌿 {label} ({confidence:.1f}%)", "🟢"
+    else:
+        return f"🚨 {label} ({confidence:.1f}%)", "🔴"
+
+def predict_from_buffer(data_buffer):
+    """Make prediction"""
+    try:
+        X_model = prepare_sequence_for_model(data_buffer)
+        predictions = model.predict(X_model, verbose=0)
+        
+        predicted_class_idx = np.argmax(predictions, axis=1)[0]
+        predicted_confidence = np.max(predictions, axis=1)[0] * 100
+        
+        class_probs = {LABEL_MAP.get(i, f"Class_{i}"): predictions[0][i] * 100 
+                       for i in range(len(predictions[0]))}
+        
+        status_text, emoji = get_label_from_index(predicted_class_idx, predicted_confidence)
+        
+        return status_text, emoji, predicted_confidence, class_probs, True
+        
+    except Exception as e:
+        print(f"\n❌ Prediction error: {e}")
+        return "ERROR", "❌", 0.0, {}, False
+
+def log_prediction(timestamp, sensor_data, prediction, confidence):
+    """Log to CSV"""
+    try:
+        log_data = {
+            'timestamp': timestamp,
+            'temp_c': sensor_data['temp_c'],
+            'humidity_p': sensor_data['humidity_p'],
+            'pressure_hpa': sensor_data['pressure_hpa'],
+            'light_lux': sensor_data['light_lux'],
+            'soil_moisture_p': sensor_data['soil_moisture_p'],
+            'bio_signal_mv': sensor_data['bio_signal_mv'],
+            'prediction': prediction,
+            'confidence': confidence
+        }
+        
+        df = pd.DataFrame([log_data])
+        
+        if not os.path.exists(LOG_FILE):
+            df.to_csv(LOG_FILE, index=False)
+        else:
+            df.to_csv(LOG_FILE, mode='a', header=False, index=False)
+            
+    except Exception as e:
+        pass  # Silent fail for logging
+
+# ===============================================
+# === 5. MAIN LOOP WITH ERROR HANDLING ===
+# ===============================================
+
 data_buffer = []
+prediction_count = 0
+error_count = 0
 
 try:
     ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=5)
-    time.sleep(2) # Give time for the connection to establish
-    print(f"\nConnected to ESP32 on {SERIAL_PORT}. Waiting for {TIMESTEPS} samples...")
-    print("-" * 50)
+    time.sleep(2)
+    ser.reset_input_buffer()
     
-    # Clear any leftover data in the serial buffer
-    ser.reset_input_buffer() 
-
+    print(f"\n✅ Connected to ESP32 successfully!")
+    print(f"⏳ Collecting {TIMESTEPS} samples (approximately {TIMESTEPS * 5} seconds)...")
+    print("="*60 + "\n")
+    
     while True:
-        # Read the entire line (JSON object) from the ESP32
-        if ser.in_waiting > 0:
-            line = ser.readline().decode('utf-8').strip()
-            
-            if line.startswith('{'): 
+        try:
+            if ser.in_waiting > 0:
+                # Read with error handling
                 try:
-                    # Parse the JSON string
-                    data = json.loads(line)
-                    
-                    # Extract features in the correct order
-                    new_sample = [data[key] for key in feature_keys]
-                    
-                    # Add the new sample to the buffer
-                    data_buffer.append(new_sample)
-
-                    print(f"Sample received ({len(data_buffer)}/{TIMESTEPS}): {new_sample}")
-                    
-                    # Check if we have enough data points (TIMESTEPS) to make a prediction
-                    if len(data_buffer) >= TIMESTEPS:
+                    line = ser.readline().decode('utf-8', errors='ignore').strip()
+                except UnicodeDecodeError:
+                    error_count += 1
+                    if error_count % 10 == 0:
+                        print(f"⚠️  {error_count} decode errors (ignoring corrupt data)")
+                    continue
+                
+                # Parse JSON
+                if line.startswith('{'):
+                    try:
+                        data = json.loads(line)
                         
-                        # --- Make Prediction ---
-                        pred_label, pred_conf, status = predict_from_buffer(data_buffer)
+                        # Extract features
+                        new_sample = [data[key] for key in HARDWARE_FEATURE_KEYS]
+                        data_buffer.append(new_sample)
                         
-                        print("\n" + "=" * 50)
-                        print("✨ NEW PLANT CONDITION PREDICTION ✨")
-                        print(f"Predicted Class: *{pred_label}*")
-                        print(f"Confidence: *{pred_conf:.2f}%*")
-                        print(f"Status: *{status}*")
-                        print("=" * 50 + "\n")
+                        # Display progress
+                        print(f"📊 Sample {len(data_buffer):2d}/{TIMESTEPS} | "
+                              f"Temp: {data['temp_c']:5.1f}°C | "
+                              f"Humid: {data['humidity_p']:5.1f}% | "
+                              f"Soil: {data['soil_moisture_p']:3.0f}% | "
+                              f"Bio: {data['bio_signal_mv']:7.2f}mV")
                         
-                        # --- IMPORTANT: Shift the buffer ---
-                        # For continuous monitoring, we remove the oldest sample 
-                        # to make room for the next, maintaining a sliding window of TIMESTEPS.
-                        data_buffer.pop(0)
+                        # Predict when buffer full
+                        if len(data_buffer) >= TIMESTEPS:
+                            prediction_count += 1
+                            
+                            status, emoji, confidence, class_probs, success = predict_from_buffer(data_buffer)
+                            
+                            if success:
+                                # Display results
+                                print("\n" + "="*60)
+                                print(f"{emoji} PREDICTION #{prediction_count}")
+                                print("="*60)
+                                print(f"🔮 Status: {status}\n")
+                                print(f"📈 Class Probabilities:")
+                                for class_name, prob in sorted(class_probs.items(), 
+                                                               key=lambda x: x[1], 
+                                                               reverse=True):
+                                    bar = "█" * int(prob / 2)
+                                    print(f"   {class_name:20s}: {bar:25s} {prob:5.1f}%")
+                                
+                                print(f"\n📊 Sensor Readings:")
+                                print(f"   Temperature:    {data['temp_c']:5.1f}°C")
+                                print(f"   Humidity:       {data['humidity_p']:5.1f}%")
+                                print(f"   Pressure:       {data['pressure_hpa']:7.2f} hPa")
+                                print(f"   Soil Moisture:  {data['soil_moisture_p']:3.0f}%")
+                                print(f"   Bio-Signal:     {data['bio_signal_mv']:7.2f} mV")
+                                print(f"   Light:          {data['light_lux']:6.0f} lux")
+                                print("="*60 + "\n")
+                                
+                                log_prediction(data['timestamp'], data, status, confidence)
+                            
+                            # Rolling window
+                            data_buffer.pop(0)
+                            
+                    except json.JSONDecodeError:
+                        pass
+                    except KeyError as e:
+                        print(f"⚠️  Missing key: {e}")
+                    except Exception as e:
+                        print(f"⚠️  Error: {e}")
+            
+            time.sleep(0.01)  # Small delay
+            
+        except serial.SerialException as e:
+            print(f"\n❌ Serial error: {e}")
+            print("Attempting to reconnect...")
+            time.sleep(2)
+            try:
+                ser.close()
+                ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=5)
+                print("✅ Reconnected!")
+            except:
+                break
 
-                except json.JSONDecodeError:
-                    # This happens if the line is incomplete or corrupted
-                    print(f"Skipping incomplete line: {line[:50]}...")
-                except Exception as e:
-                    print(f"An unexpected error occurred during prediction: {e}")
-                    
-        time.sleep(0.1) # Small delay to prevent burning up CPU
-
-except serial.SerialException as e:
-    print(f"\nCRITICAL: Failed to connect to serial port {SERIAL_PORT}. {e}")
-    print("Please check the port name, baud rate, and connection.")
 except KeyboardInterrupt:
-    print("\nPrediction loop stopped by user.")
+    print(f"\n\n⏹️  Stopped by user")
+    print(f"📊 Predictions: {prediction_count} | Errors: {error_count}")
+    print(f"💾 Log: {LOG_FILE}")
+
+except Exception as e:
+    print(f"\n❌ Fatal error: {e}")
+
 finally:
     if 'ser' in locals() and ser.is_open:
         ser.close()
-        print("Serial port closed.")
+        print("🔌 Serial closed")
+    print("\n👋 Thank you for using Green Voice!")
